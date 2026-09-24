@@ -57,9 +57,11 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
 
     const form = useForm<{
         account: string
+        project: string
     }>({
         defaultValues: {
-            account: ''
+            account: '',
+            project: ''
         }
     })
 
@@ -70,11 +72,12 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
 
     const setIsOpen = useSetAtom(bankRecRecordJournalEntryModalAtom)
 
-    const onSubmit = (data: { account: string }) => {
+    const onSubmit = (data: { account: string, project: string }) => {
 
         call({
             bank_transactions: selectedTransactions.map(transaction => transaction.name),
-            account: data.account
+            account: data.account,
+            project: data.project
         }).then(({ message }) => {
 
             addToActionLog({
@@ -120,6 +123,21 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
                         }}
                         label={_('Account')}
                         isRequired
+                    />
+                    <LinkFormField
+                        doctype="Project"
+                        name='project'
+                        label={_('Project')}
+                        customQuery={{
+                            query: "erpnext.controllers.queries.get_project_name",
+                            filters: {
+                                company: selectedTransactions[0]?.company ?? '',
+                            }
+                        }}
+                        isRequired
+                        rules={{
+                            required: _("Project is required"),
+                        }}
                     />
                 </div>
 
@@ -167,7 +185,8 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                 credit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                 party_type: '',
                 party: '',
-                cost_center: ''
+                cost_center: '',
+                project: ''
             }]
 
         // If there is no rule, we can just add the entries for the bank account transaction and the other side will be the reverse
@@ -179,6 +198,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                     debit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                     credit: isWithdrawal ? 0 : selectedTransaction.unallocated_amount,
                     cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
+                    project: '',
                 }
             )
         } else {
@@ -191,6 +211,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                     debit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                     credit: isWithdrawal ? 0 : selectedTransaction.unallocated_amount,
                     cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
+                    project: '',
                 })
             } else {
                 // For multiple accounts, we need to loop over and add entries for each
@@ -212,6 +233,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                             debit: differenceAmount > 0 ? 0 : Math.abs(differenceAmount),
                             credit: differenceAmount > 0 ? Math.abs(differenceAmount) : 0,
                             cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
+                            project: '',
                             user_remark: acc?.user_remark ?? '',
                         })
                     } else {
@@ -231,6 +253,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                             debit: computedDebit,
                             credit: computedCredit,
                             cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
+                            project: '',
                             user_remark: acc?.user_remark ?? '',
                         })
                     }
@@ -481,7 +504,8 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
             account: '',
             debit: debitAmount,
             credit: creditAmount,
-            cost_center: getCompanyCostCenter(company) ?? ''
+            cost_center: getCompanyCostCenter(company) ?? '',
+            project: ''
         } as JournalEntryAccount, {
             focusName: `entries.${existingEntries.length}.account`
         })
@@ -543,7 +567,8 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                 account: '',
                 debit: debitAmount,
                 credit: creditAmount,
-                cost_center: getCompanyCostCenter(company) ?? ''
+                cost_center: getCompanyCostCenter(company) ?? '',
+                project: ''
             } as JournalEntryAccount, {
                 focusName: `entries.${existingEntries.length}.account`
             })
@@ -565,6 +590,7 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                     <TableHead>{_("Party")}</TableHead>
                     <TableHead>{_("Account")}</TableHead>
                     <TableHead>{_("Cost Center")}</TableHead>
+                    <TableHead>{_("Project")}</TableHead>
                     <TableHead>{_("Remarks")}</TableHead>
                     <TableHead className="text-end">{_("Debit")}</TableHead>
                     <TableHead className="text-end">{_("Credit")}</TableHead>
@@ -625,6 +651,25 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                                 name={`entries.${index}.cost_center`}
                                 label={_("Cost Center")}
                                 filters={[["company", "=", company], ["is_group", "=", 0], ["disabled", "=", 0]]}
+                                buttonClassName="min-w-48"
+                                readOnly={index === 0}
+                                hideLabel
+                            />
+                        </TableCell>
+                        <TableCell className="align-top">
+                            <LinkFormField
+                                doctype="Project"
+                                name={`entries.${index}.project`}
+                                label={_("Project")}
+                                customQuery={{
+                                    query: "erpnext.controllers.queries.get_project_name",
+                                    filters: {
+                                        company,
+                                    }
+                                }}
+                                rules={index !== 0 ? {
+                                    required: _("Project is required"),
+                                } : undefined}
                                 buttonClassName="min-w-48"
                                 readOnly={index === 0}
                                 hideLabel

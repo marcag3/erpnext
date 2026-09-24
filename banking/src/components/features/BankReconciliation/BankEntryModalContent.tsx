@@ -3,7 +3,7 @@ import { bankRecRecordJournalEntryModalAtom, bankRecSelectedTransactionAtom, ban
 import { DialogFooter, DialogClose } from "@/components/ui/dialog"
 import _ from "@/lib/translate"
 import { UnreconciledTransaction, useGetRuleForTransaction, useRefreshUnreconciledTransactions, useUpdateActionLog } from "./utils"
-import { useFieldArray, useForm, useFormContext, useWatch } from "react-hook-form"
+import { FieldValues, UseFormSetValue, useFieldArray, useForm, useFormContext, useWatch } from "react-hook-form"
 import { JournalEntry } from "@/types/Accounts/JournalEntry"
 import { getCompanyCostCenter, getCompanyCurrency } from "@/lib/company"
 import { FrappeConfig, FrappeContext, useFrappePostCall } from "frappe-react-sdk"
@@ -13,7 +13,16 @@ import { Button } from "@/components/ui/button"
 import SelectedTransactionDetails from "./SelectedTransactionDetails"
 import { AccountFormField, CurrencyFormField, DataField, DateField, LinkFormField, PartyTypeFormField, SmallTextField } from "@/components/ui/form-elements"
 import { Form } from "@/components/ui/form"
-import { useCallback, useContext, useMemo, useRef, useState } from "react"
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
+import AccountingDimensionField from "./AccountingDimensionField"
+import {
+    AccountingDimensionConfig,
+    getDimensionDefaults,
+    getDimensionValuesForAccount,
+    isDimensionRequired,
+    useJournalEntryAccountingDimensions,
+} from "@/hooks/useJournalEntryAccountingDimensions"
+import { TableLoader } from "@/components/ui/loaders"
 import { useMultiFileUploadProgress } from "@/hooks/useMultiFileUploadProgress"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -36,33 +45,53 @@ const RecordBankEntryModalContent = () => {
 
     const selectedTransaction = useAtomValue(bankRecSelectedTransactionAtom(selectedBankAccount?.name ?? ''))
 
+    const company = selectedTransaction?.[0]?.company ?? ''
+    // Forms read their default values only once, so they must mount after the config has loaded
+    const { config, isLoading, error } = useJournalEntryAccountingDimensions(company)
+
     if (!selectedTransaction || !selectedBankAccount || selectedTransaction.length === 0) {
         return <div className='p-4'>
             <span className='text-center'>{_("No transaction selected")}</span>
         </div>
     }
 
+    if (isLoading) {
+        return <TableLoader columns={4} rows={4} />
+    }
+
+    if (error) {
+        return <ErrorBanner error={error} />
+    }
+
     if (selectedTransaction.length === 1) {
         return <BankEntryForm
-            selectedTransaction={selectedTransaction[0]} />
+            selectedTransaction={selectedTransaction[0]}
+            config={config} />
     }
 
     return <BulkBankEntryForm
         selectedTransactions={selectedTransaction}
+        config={config}
     />
 
 }
 
-const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: UnreconciledTransaction[] }) => {
+const BulkBankEntryForm = ({ selectedTransactions, config }: { selectedTransactions: UnreconciledTransaction[], config: AccountingDimensionConfig }) => {
 
-    const form = useForm<{
-        account: string
-        project: string
-    }>({
+    const company = selectedTransactions[0]?.company ?? ''
+    const dimensions = config.dimensions
+    const { data: accounts } = useGetAccounts()
+
+    const dimensionDefaults = useMemo(
+        () => getDimensionDefaults(dimensions, config.defaults, company, getCompanyCostCenter),
+        [dimensions, config.defaults, company],
+    )
+
+    const form = useForm<Record<string, string>>({
         defaultValues: {
             account: '',
-            project: ''
-        }
+            ...dimensionDefaults,
+        },
     })
 
     const { call, loading, error } = useFrappePostCall<{ message: { transaction: BankTransaction, journal_entry: JournalEntry }[] }>('erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool.create_bulk_bank_entry_and_reconcile')
@@ -71,13 +100,28 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
     const addToActionLog = useUpdateActionLog()
 
     const setIsOpen = useSetAtom(bankRecRecordJournalEntryModalAtom)
+    const selectedAccount = form.watch('account')
+    const selectedAccountReportType = accounts?.find((account) => account.name === selectedAccount)?.report_type
 
-    const onSubmit = (data: { account: string, project: string }) => {
+    const { setValue } = form
+    useEffect(() => {
+        if (!selectedAccount || !selectedAccountReportType) {
+            return
+        }
+
+        const values = getDimensionValuesForAccount(dimensions, dimensionDefaults, config.mandatory, selectedAccountReportType)
+        for (const [fieldname, value] of Object.entries(values)) {
+            setValue(fieldname, value)
+        }
+    }, [selectedAccount, selectedAccountReportType, dimensions, dimensionDefaults, config.mandatory, setValue])
+
+    const onSubmit = (data: Record<string, string>) => {
+        const { account, ...dimensionValues } = data
 
         call({
             bank_transactions: selectedTransactions.map(transaction => transaction.name),
-            account: data.account,
-            project: data.project
+            account,
+            dimensions: dimensionValues,
         }).then(({ message }) => {
 
             addToActionLog({
@@ -94,7 +138,8 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
                     }
                 })),
                 bulkCommonData: {
-                    account: data.account,
+                    account,
+                    ...dimensionValues,
                 }
             })
 
@@ -124,21 +169,20 @@ const BulkBankEntryForm = ({ selectedTransactions }: { selectedTransactions: Unr
                         label={_('Account')}
                         isRequired
                     />
-                    <LinkFormField
-                        doctype="Project"
-                        name='project'
-                        label={_('Project')}
-                        customQuery={{
-                            query: "erpnext.controllers.queries.get_project_name",
-                            filters: {
-                                company: selectedTransactions[0]?.company ?? '',
-                            }
-                        }}
-                        isRequired
-                        rules={{
-                            required: _("Project is required"),
-                        }}
-                    />
+                    {dimensions.map((dimension) => (
+                        <AccountingDimensionField
+                            key={dimension.fieldname}
+                            dimension={dimension}
+                            company={company}
+                            name={dimension.fieldname}
+                            account={selectedAccount}
+                            required={isDimensionRequired(
+                                dimension.fieldname,
+                                config.mandatory,
+                                selectedAccountReportType,
+                            )}
+                        />
+                    ))}
                 </div>
 
                 <DialogFooter>
@@ -158,11 +202,19 @@ interface BankEntryFormData extends Pick<JournalEntry, 'voucher_type' | 'cheque_
 }
 
 
-const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: UnreconciledTransaction }) => {
+const BankEntryForm = ({ selectedTransaction, config }: { selectedTransaction: UnreconciledTransaction, config: AccountingDimensionConfig }) => {
 
     const selectedBankAccount = useAtomValue(selectedBankAccountAtom)
+    const company = selectedTransaction.company ?? ''
+    const dimensions = config.dimensions
+
+    const dimensionDefaults = useMemo(
+        () => getDimensionDefaults(dimensions, config.defaults, company, getCompanyCostCenter),
+        [dimensions, config.defaults, company],
+    )
 
     const { data: rule } = useGetRuleForTransaction(selectedTransaction)
+    const { data: glAccounts } = useGetAccounts()
 
     const setIsOpen = useSetAtom(bankRecRecordJournalEntryModalAtom)
 
@@ -176,6 +228,14 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
 
         const isWithdrawal = (selectedTransaction.withdrawal && selectedTransaction.withdrawal > 0) ? true : false
 
+        const getRowDimensions = (account?: string) => {
+            const reportType = glAccounts?.find((acc) => acc.name === account)?.report_type
+            if (!account || !reportType) {
+                return dimensionDefaults
+            }
+            return getDimensionValuesForAccount(dimensions, dimensionDefaults, config.mandatory, reportType)
+        }
+
         const accounts: Partial<JournalEntryAccount>[] = [
             {
                 account: selectedBankAccount?.account ?? '',
@@ -185,8 +245,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                 credit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                 party_type: '',
                 party: '',
-                cost_center: '',
-                project: ''
+                ...getRowDimensions(selectedBankAccount?.account),
             }]
 
         // If there is no rule, we can just add the entries for the bank account transaction and the other side will be the reverse
@@ -197,8 +256,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                     // Amounts will be the reverse of the bank account transaction
                     debit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                     credit: isWithdrawal ? 0 : selectedTransaction.unallocated_amount,
-                    cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
-                    project: '',
+                    ...getRowDimensions(),
                 }
             )
         } else {
@@ -210,8 +268,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                     // Amounts will be the reverse of the bank account transaction
                     debit: isWithdrawal ? selectedTransaction.unallocated_amount : 0,
                     credit: isWithdrawal ? 0 : selectedTransaction.unallocated_amount,
-                    cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
-                    project: '',
+                    ...getRowDimensions(rule.account),
                 })
             } else {
                 // For multiple accounts, we need to loop over and add entries for each
@@ -232,8 +289,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                             account: acc?.account ?? '',
                             debit: differenceAmount > 0 ? 0 : Math.abs(differenceAmount),
                             credit: differenceAmount > 0 ? Math.abs(differenceAmount) : 0,
-                            cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
-                            project: '',
+                            ...getRowDimensions(acc?.account),
                             user_remark: acc?.user_remark ?? '',
                         })
                     } else {
@@ -252,8 +308,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                             account: acc?.account ?? '',
                             debit: computedDebit,
                             credit: computedCredit,
-                            cost_center: getCompanyCostCenter(selectedTransaction.company ?? '') ?? '',
-                            project: '',
+                            ...getRowDimensions(acc?.account),
                             user_remark: acc?.user_remark ?? '',
                         })
                     }
@@ -263,7 +318,7 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
 
         return accounts
 
-    }, [rule, selectedTransaction, selectedBankAccount])
+    }, [rule, selectedTransaction, selectedBankAccount, glAccounts, dimensions, dimensionDefaults, config.mandatory])
 
     const form = useForm<BankEntryFormData>({
         defaultValues: {
@@ -408,7 +463,13 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
                 </div>
 
                 <div>
-                    <Entries company={selectedTransaction.company ?? ''} isWithdrawal={isWithdrawal} currency={selectedTransaction.currency ?? getCompanyCurrency(selectedTransaction.company ?? '')} />
+                    <Entries
+                        company={company}
+                        isWithdrawal={isWithdrawal}
+                        currency={selectedTransaction.currency ?? getCompanyCurrency(company)}
+                        dimensions={dimensions}
+                        dimensionConfig={config}
+                    />
                 </div>
                 <div className='flex flex-col gap-2'>
                     <div className='grid grid-cols-2 gap-4'>
@@ -438,9 +499,68 @@ const BankEntryForm = ({ selectedTransaction }: { selectedTransaction: Unreconci
 
 }
 
-const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithdrawal: boolean, currency: string }) => {
+const Entries = ({
+    company,
+    isWithdrawal,
+    currency,
+    dimensions,
+    dimensionConfig,
+}: {
+    company: string
+    isWithdrawal: boolean
+    currency: string
+    dimensions: ReturnType<typeof useJournalEntryAccountingDimensions>['dimensions']
+    dimensionConfig: AccountingDimensionConfig
+}) => {
 
     const { getValues, setValue, control } = useFormContext<BankEntryFormData>()
+
+    const entries = useWatch({ control, name: 'entries' })
+
+    // Dimension fieldnames are only known at runtime, so they are not part of the typed form paths
+    const setDimensionValue = useCallback((index: number, fieldname: string, value: string) => {
+        (setValue as unknown as UseFormSetValue<FieldValues>)(`entries.${index}.${fieldname}`, value)
+    }, [setValue])
+
+    const dimensionDefaults = useMemo(
+        () => getDimensionDefaults(dimensions, dimensionConfig.defaults, company, getCompanyCostCenter),
+        [dimensions, dimensionConfig.defaults, company],
+    )
+
+    const { data: accounts } = useGetAccounts()
+
+    const bankRowFallbackDimensions = useMemo(
+        () => getDimensionValuesForAccount(dimensions, dimensionDefaults, dimensionConfig.mandatory, "Balance Sheet"),
+        [dimensions, dimensionDefaults, dimensionConfig.mandatory],
+    )
+
+    // The bank row is read-only, so it mirrors a dimension only when all other rows agree on one value
+    useEffect(() => {
+        if (!entries || entries.length < 2 || dimensions.length === 0) {
+            return
+        }
+
+        for (const dimension of dimensions) {
+            const fieldname = dimension.fieldname as keyof JournalEntryAccount
+            const values = [...new Set(entries.slice(1).map((row) => row[fieldname]).filter(Boolean))]
+            const nextValue = values.length === 1 ? values[0] as string : bankRowFallbackDimensions[dimension.fieldname] || ''
+            if ((entries[0]?.[fieldname] || '') !== nextValue) {
+                setDimensionValue(0, dimension.fieldname, nextValue)
+            }
+        }
+    }, [entries, setDimensionValue, dimensions, bankRowFallbackDimensions])
+
+    const getOffsetDimensions = useCallback(() => {
+        const offsetRows = getValues('entries').slice(1)
+        const values: Record<string, string> = {}
+
+        for (const dimension of dimensions) {
+            const inheritedValue = offsetRows.find((row) => row[dimension.fieldname as keyof JournalEntryAccount])?.[dimension.fieldname as keyof JournalEntryAccount]
+            values[dimension.fieldname] = (inheritedValue as string) || dimensionDefaults[dimension.fieldname] || ''
+        }
+
+        return values
+    }, [dimensions, dimensionDefaults, getValues])
 
     const { call } = useContext(FrappeContext) as FrappeConfig
 
@@ -466,20 +586,13 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
         }
     }
 
-    const { data: accounts } = useGetAccounts()
-
     const onAccountChange = (value: string, index: number) => {
-        // If it's an income or expense account, get the default cost center
-        if (value) {
-            const account = accounts?.find((acc) => acc.name === value)
-            if (account && account.report_type === "Profit and Loss") {
-                // Set the default company cost center
-                setValue(`entries.${index}.cost_center`, getCompanyCostCenter(company) ?? '')
-                return
-            }
-        }
+        const reportType = value ? accounts?.find((acc) => acc.name === value)?.report_type : undefined
+        const values = getDimensionValuesForAccount(dimensions, dimensionDefaults, dimensionConfig.mandatory, reportType)
 
-        setValue(`entries.${index}.cost_center`, '')
+        for (const [fieldname, dimensionValue] of Object.entries(values)) {
+            setDimensionValue(index, fieldname, dimensionValue)
+        }
     }
 
     const { fields, append, remove } = useFieldArray({
@@ -504,14 +617,18 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
             account: '',
             debit: debitAmount,
             credit: creditAmount,
-            cost_center: getCompanyCostCenter(company) ?? '',
-            project: ''
+            ...getOffsetDimensions(),
         } as JournalEntryAccount, {
             focusName: `entries.${existingEntries.length}.account`
         })
-    }, [company, append, getValues])
+    }, [append, getOffsetDimensions, getValues])
 
     const [selectedRows, setSelectedRows] = useState<number[]>([])
+
+    const entryReportTypes = useMemo(
+        () => (entries ?? []).map((row) => accounts?.find((acc) => acc.name === row.account)?.report_type),
+        [entries, accounts],
+    )
 
     const onSelectRow = useCallback((index: number) => {
         setSelectedRows(prev => {
@@ -567,8 +684,7 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                 account: '',
                 debit: debitAmount,
                 credit: creditAmount,
-                cost_center: getCompanyCostCenter(company) ?? '',
-                project: ''
+                ...getOffsetDimensions(),
             } as JournalEntryAccount, {
                 focusName: `entries.${existingEntries.length}.account`
             })
@@ -589,8 +705,11 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                         onCheckedChange={onSelectAll} /></TableHead>
                     <TableHead>{_("Party")}</TableHead>
                     <TableHead>{_("Account")}</TableHead>
-                    <TableHead>{_("Cost Center")}</TableHead>
-                    <TableHead>{_("Project")}</TableHead>
+                    {dimensions.map((dimension) => (
+                        <TableHead key={dimension.fieldname}>
+                            {dimension.label || _(dimension.document_type)}
+                        </TableHead>
+                    ))}
                     <TableHead>{_("Remarks")}</TableHead>
                     <TableHead className="text-end">{_("Debit")}</TableHead>
                     <TableHead className="text-end">{_("Credit")}</TableHead>
@@ -645,36 +764,22 @@ const Entries = ({ company, isWithdrawal, currency }: { company: string, isWithd
                                 hideLabel
                             />
                         </TableCell>
-                        <TableCell className="align-top">
-                            <LinkFormField
-                                doctype="Cost Center"
-                                name={`entries.${index}.cost_center`}
-                                label={_("Cost Center")}
-                                filters={[["company", "=", company], ["is_group", "=", 0], ["disabled", "=", 0]]}
-                                buttonClassName="min-w-48"
-                                readOnly={index === 0}
-                                hideLabel
-                            />
-                        </TableCell>
-                        <TableCell className="align-top">
-                            <LinkFormField
-                                doctype="Project"
-                                name={`entries.${index}.project`}
-                                label={_("Project")}
-                                customQuery={{
-                                    query: "erpnext.controllers.queries.get_project_name",
-                                    filters: {
-                                        company,
-                                    }
-                                }}
-                                rules={index !== 0 ? {
-                                    required: _("Project is required"),
-                                } : undefined}
-                                buttonClassName="min-w-48"
-                                readOnly={index === 0}
-                                hideLabel
-                            />
-                        </TableCell>
+                        {dimensions.map((dimension) => (
+                            <TableCell className="align-top" key={dimension.fieldname}>
+                                <AccountingDimensionField
+                                    dimension={dimension}
+                                    company={company}
+                                    name={`entries.${index}.${dimension.fieldname}`}
+                                    readOnly={index === 0}
+                                    account={entries?.[index]?.account}
+                                    required={index !== 0 && isDimensionRequired(
+                                        dimension.fieldname,
+                                        dimensionConfig.mandatory,
+                                        entryReportTypes[index],
+                                    )}
+                                />
+                            </TableCell>
+                        ))}
                         <TableCell className="align-top">
                             <DataField
                                 name={`entries.${index}.user_remark`}

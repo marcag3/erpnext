@@ -63,6 +63,8 @@ export interface ActionLog {
         party?: string,
         account?: string,
         bank_account?: string,
+        /** Accounting dimension values, keyed by dimension fieldname */
+        [dimension: string]: string | undefined,
     }
 }
 

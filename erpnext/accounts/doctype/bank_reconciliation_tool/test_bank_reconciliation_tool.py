@@ -10,6 +10,7 @@ from frappe.utils import add_days, today
 
 from erpnext.accounts.doctype.bank_reconciliation_tool.bank_reconciliation_tool import (
 	auto_reconcile_vouchers,
+	create_bulk_bank_entry_and_reconcile,
 	create_bulk_payment_entry_and_reconcile,
 	create_payment_entry_and_reconcile,
 	get_auto_reconcile_message,
@@ -286,6 +287,24 @@ class TestBankReconciliationTool(ERPNextTestSuite, AccountsTestMixin):
 		self.assertEqual(pe.target_exchange_rate, 3.0)
 		self.assertEqual((pe.paid_amount, pe.received_amount), (100, 33.33))
 		self.assertEqual(pe.difference_amount, 0)
+
+	def test_bulk_bank_entry_applies_only_dimension_values(self):
+		cost_center = "_Test Cost Center - _TC"
+		expense_account = "_Test Account Cost for Goods Sold - _TC"
+		txn = self.make_bank_transaction(date=today(), deposit=0, withdrawal=100)
+
+		result = create_bulk_bank_entry_and_reconcile(
+			[txn.name],
+			expense_account,
+			dimensions={"cost_center": cost_center, "debit": 1, "account": "Debtors - _TC", "project": ""},
+		)
+
+		je = frappe.get_doc("Journal Entry", result[0]["journal_entry"].name)
+		rows = {row.account: row for row in je.accounts}
+		self.assertEqual(set(rows), {self.bank, expense_account})
+		self.assertEqual(rows[expense_account].debit, 100)
+		self.assertEqual(rows[self.bank].credit, 100)
+		self.assertEqual({row.cost_center for row in je.accounts}, {cost_center})
 
 	def enable_multi_currency_setup(self):
 		# USD party/accounts + a company gain/loss account to absorb rounding residuals

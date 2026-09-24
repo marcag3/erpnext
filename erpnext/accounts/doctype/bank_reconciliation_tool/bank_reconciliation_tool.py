@@ -582,13 +582,56 @@ def create_internal_transfer(
 	}
 
 
+@frappe.whitelist()
+def get_accounting_dimension_config(company: str):
+	from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+		get_checks_for_pl_and_bs_accounts,
+		get_dimensions,
+	)
+
+	if not frappe.db.get_single_value("Accounts Settings", "enable_accounting_dimensions"):
+		return {"enabled": False, "dimensions": [], "defaults": {}, "mandatory": {}}
+
+	dimensions, defaults_map = get_dimensions(with_cost_center_and_project=True)
+
+	mandatory = {}
+
+	for check in get_checks_for_pl_and_bs_accounts():
+		if check.company == company:
+			mandatory[check.fieldname] = {
+				"label": check.label,
+				"mandatory_for_pl": check.mandatory_for_pl,
+				"mandatory_for_bs": check.mandatory_for_bs,
+			}
+
+	return {
+		"enabled": bool(dimensions),
+		"dimensions": dimensions,
+		"defaults": defaults_map.get(company, {}),
+		"mandatory": mandatory,
+	}
+
+
+def get_allowed_dimension_values(dimensions: dict | None) -> dict:
+	from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import get_dimensions
+
+	if not dimensions:
+		return {}
+
+	allowed_fieldnames = {d.fieldname for d in get_dimensions(with_cost_center_and_project=True)[0]}
+	return {key: value for key, value in dimensions.items() if key in allowed_fieldnames and value}
+
+
 @frappe.whitelist(methods=["POST"])
-def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], account: str):
+def create_bulk_bank_entry_and_reconcile(
+	bank_transactions: list[str | int], account: str, dimensions: dict | None = None
+):
 	"""
 	Create bank entries for all transactions and reconcile them
 	"""
 
 	output = []
+	dimension_values = get_allowed_dimension_values(dimensions)
 
 	for bank_transaction in bank_transactions:
 		transactions_details = frappe.db.get_value(
@@ -624,6 +667,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 		if is_withdrawal:
 			entries.append(
 				{
+					**dimension_values,
 					"account": gl_account,
 					"bank_account": transactions_details.bank_account,
 					"credit_in_account_currency": transactions_details.unallocated_amount,
@@ -635,6 +679,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 
 			entries.append(
 				{
+					**dimension_values,
 					"account": account,
 					"credit": 0,
 					"debit": transactions_details.unallocated_amount,
@@ -643,6 +688,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 		else:
 			entries.append(
 				{
+					**dimension_values,
 					"account": gl_account,
 					"bank_account": transactions_details.bank_account,
 					"debit_in_account_currency": transactions_details.unallocated_amount,
@@ -654,6 +700,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 
 			entries.append(
 				{
+					**dimension_values,
 					"account": account,
 					"debit": 0,
 					"credit": transactions_details.unallocated_amount,

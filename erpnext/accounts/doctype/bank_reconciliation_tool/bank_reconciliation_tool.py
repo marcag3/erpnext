@@ -583,7 +583,9 @@ def create_internal_transfer(
 
 
 @frappe.whitelist(methods=["POST"])
-def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], account: str):
+def create_bulk_bank_entry_and_reconcile(
+	bank_transactions: list[str | int], account: str, project: str | None = None
+):
 	"""
 	Create bank entries for all transactions and reconcile them
 	"""
@@ -638,6 +640,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 					"account": account,
 					"credit": 0,
 					"debit": transactions_details.unallocated_amount,
+					"project": project,
 				}
 			)
 		else:
@@ -657,6 +660,7 @@ def create_bulk_bank_entry_and_reconcile(bank_transactions: list[str | int], acc
 					"account": account,
 					"debit": 0,
 					"credit": transactions_details.unallocated_amount,
+					"project": project,
 				}
 			)
 
